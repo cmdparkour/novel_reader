@@ -55,11 +55,9 @@ class _ReaderPageState extends State<ReaderPage> {
       fontSize: settings.fontSize,
       height: settings.lineHeight,
     );
-    // Available width/height inside page padding
-    // Horizontal: 16 each side = 32 total
-    // Vertical: 16 top + 48 bottom (reserve space for menu overlay)
+    // Available width/height inside page padding (16 each side)
     final availableWidth = pageSize.width - 32;
-    final availableHeight = pageSize.height - 64;
+    final availableHeight = pageSize.height - 32;
 
     // Layout entire content to get line metrics
     final tp = TextPainter(
@@ -739,7 +737,7 @@ class _ReaderPageState extends State<ReaderPage> {
   Widget _buildPageContent(ReadingSettings settings, String pageContent) {
     return Container(
       color: Color(settings.backgroundColor),
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 48),
+      padding: const EdgeInsets.all(16),
       child: Text(
         pageContent,
         style: TextStyle(
