@@ -1,10 +1,16 @@
 import '../models/chapter.dart';
 
 class ChapterParser {
-  /// Volume-level patterns: 第X卷/篇/部 (standalone, not combined with 第X章)
+  /// Volume-level patterns: 第X卷/篇/部 (standalone, NOT combined with 第X章 on same line)
   static final RegExp _volumePattern = RegExp(
-    r'^\s*第[零一二三四五六七八九十百千万\d]+[卷篇部]\s+.{1,30}$',
+    r'^\s*第[零一二三四五六七八九十百千万\d]+[卷篇部]\s+(?!.*第[零一二三四五六七八九十百千万\d]+[章节回]).{1,30}$',
     multiLine: true,
+  );
+
+  /// Pattern to extract inline volume prefix from chapter titles like
+  /// "第一篇 一夜觉醒 第七十章 魔窟、战场"
+  static final RegExp _inlineVolumePrefix = RegExp(
+    r'^(第[零一二三四五六七八九十百千万\d]+[篇卷部]\s*.{0,15}?)\s+第[零一二三四五六七八九十百千万\d]+[章节回]',
   );
 
   /// Chapter-level patterns (ordered by specificity).
@@ -154,10 +160,27 @@ class ChapterParser {
           );
         }
       } else {
+        // For chapter headings, try to extract inline volume prefix
+        // e.g. "第一篇 一夜觉醒 第七十章 魔窟、战场" → volumeTitle = "第一篇 一夜觉醒"
+        String chapterTitle = current.heading.title;
+        final inlineMatch = _inlineVolumePrefix.firstMatch(chapterTitle);
+        if (inlineMatch != null) {
+          currentVolume = inlineMatch.group(1)!.trim();
+          // Strip the volume prefix from the chapter title, keep only "第X章 ..."
+          chapterTitle =
+              chapterTitle.substring(inlineMatch.group(0)!.length).trim();
+          // The regex consumed up to but not including "第X章", so re-match to get clean title
+          final chapterStart = RegExp(r'第[零一二三四五六七八九十百千万\d]+[章节回]');
+          final chapterMatch = chapterStart.firstMatch(current.heading.title);
+          if (chapterMatch != null) {
+            chapterTitle =
+                current.heading.title.substring(chapterMatch.start).trim();
+          }
+        }
         chapters.add(
           Chapter(
             index: chapters.length,
-            title: current.heading.title,
+            title: chapterTitle,
             startPosition: current.heading.position,
             endPosition: endPos,
             volumeTitle: currentVolume,
