@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:page_flip/page_flip.dart';
 import 'package:provider/provider.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
@@ -24,7 +23,7 @@ class ReaderPage extends StatefulWidget {
 class _ReaderPageState extends State<ReaderPage> {
   final BookService _bookService = BookService();
   final ScrollController _scrollController = ScrollController();
-  final PageFlipController _pageFlipController = PageFlipController();
+  PageController _pageController = PageController();
 
   /// Full content of the book (kept in memory for chapter slicing).
   String _fullContent = '';
@@ -40,39 +39,90 @@ class _ReaderPageState extends State<ReaderPage> {
   // Page turn mode state
   List<String> _pages = [];
   int _currentPageIndex = 0;
-  int _pageFlipViewVersion = 0;
-  double _pageFlipDragDx = 0;
-  double _pageFlipDragDy = 0;
-  bool _pageFlipStartedOnFirstPage = false;
+  Size _lastLayoutSize = Size.zero;
 
   bool get _hasPreviousChapter => _currentChapterIndex > 0;
 
   bool get _hasNextChapter => _currentChapterIndex < _chapters.length - 1;
 
-  List<String> _paginateContent(String content) {
-    if (content.isEmpty) {
+  List<String> _paginateContent(String content, Size pageSize) {
+    if (content.isEmpty || pageSize == Size.zero) {
       return const [];
     }
 
     final settings = context.read<SettingsProvider>().settings;
-    final charsPerPage = (680 *
-            (18.0 / settings.fontSize) /
-            settings.lineHeight)
-        .round()
-        .clamp(200, 2000);
+    final textStyle = TextStyle(
+      fontSize: settings.fontSize,
+      height: settings.lineHeight,
+    );
+    // Available width/height inside page padding
+    // Horizontal: 16 each side = 32 total
+    // Vertical: 16 top + 48 bottom (reserve space for menu overlay)
+    final availableWidth = pageSize.width - 32;
+    final availableHeight = pageSize.height - 64;
 
+    // Layout entire content to get line metrics
+    final tp = TextPainter(
+      text: TextSpan(text: content, style: textStyle),
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+    )..layout(maxWidth: availableWidth);
+
+    final lineMetrics = tp.computeLineMetrics();
+    if (lineMetrics.isEmpty) return [content];
+
+    // Calculate how many complete lines fit per page
+    final lineHeight = lineMetrics.first.height;
+    final linesPerPage = (availableHeight / lineHeight).floor();
+    if (linesPerPage <= 0) return [content];
+
+    // Split content by line boundaries
     final pages = <String>[];
-    int start = 0;
-    while (start < content.length) {
-      int end = (start + charsPerPage).clamp(0, content.length);
-      if (end < content.length) {
-        final newlinePos = content.lastIndexOf('\n', end);
-        if (newlinePos > start + (charsPerPage * 0.5)) {
-          end = newlinePos + 1;
-        }
+    int lineIndex = 0;
+    while (lineIndex < lineMetrics.length) {
+      final pageEndLine = (lineIndex + linesPerPage).clamp(
+        0,
+        lineMetrics.length,
+      );
+
+      // Get character offset for the start of the first line on this page
+      final startOffset =
+          tp
+              .getPositionForOffset(
+                Offset(
+                  0,
+                  lineMetrics[lineIndex].baseline -
+                      lineMetrics[lineIndex].ascent,
+                ),
+              )
+              .offset;
+
+      // Get character offset for the end of the last line on this page
+      int endOffset;
+      if (pageEndLine >= lineMetrics.length) {
+        endOffset = content.length;
+      } else {
+        endOffset =
+            tp
+                .getPositionForOffset(
+                  Offset(
+                    0,
+                    lineMetrics[pageEndLine].baseline -
+                        lineMetrics[pageEndLine].ascent,
+                  ),
+                )
+                .offset;
       }
-      pages.add(content.substring(start, end));
-      start = end;
+
+      if (endOffset <= startOffset) {
+        // Safety: ensure at least some progress
+        endOffset = (startOffset + 1).clamp(0, content.length);
+        lineIndex = pageEndLine + 1;
+      } else {
+        lineIndex = pageEndLine;
+      }
+
+      pages.add(content.substring(startOffset, endOffset));
     }
     return pages;
   }
@@ -97,6 +147,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _saveProgress();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _pageController.dispose();
     context.read<SettingsProvider>().resetBrightness();
     super.dispose();
   }
@@ -146,6 +197,9 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
+  // Pending initial page index when layout size is not yet available
+  int _pendingInitialPageIndex = 0;
+
   /// Load only the content for the specified chapter.
   void _loadChapterContent(
     int chapterIndex, {
@@ -162,11 +216,19 @@ class _ReaderPageState extends State<ReaderPage> {
       chapter.startPosition,
       chapter.endPosition,
     );
-    final content = rawContent.replaceFirst(
+    final content = rawContent.replaceFirstMapped(
       RegExp(r'^([^\n]*)(\n\s*)+'),
-      r'$1\n',
+      (match) => '${match[1]}\n',
     );
-    final pages = _paginateContent(content);
+
+    // If layout size is not yet available, defer pagination
+    List<String> pages;
+    if (_lastLayoutSize == Size.zero) {
+      pages = [];
+      _pendingInitialPageIndex = initialPageIndex;
+    } else {
+      pages = _paginateContent(content, _lastLayoutSize);
+    }
     final safePageIndex =
         pages.isEmpty ? 0 : initialPageIndex.clamp(0, pages.length - 1);
 
@@ -175,7 +237,6 @@ class _ReaderPageState extends State<ReaderPage> {
       _currentChapterIndex = chapterIndex;
       _pages = pages;
       _currentPageIndex = safePageIndex;
-      _pageFlipViewVersion++;
       if (hideMenu) {
         _showMenu = false;
       }
@@ -183,12 +244,17 @@ class _ReaderPageState extends State<ReaderPage> {
 
     // Reset scroll/page position for new chapter
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       if (_scrollController.hasClients) {
         _scrollController.jumpTo(0);
       }
       final settings = context.read<SettingsProvider>().settings;
       if (settings.readingMode == ReadingMode.pageTurn && _pages.isNotEmpty) {
-        _pageFlipController.goToPage(safePageIndex);
+        final hasPrevBoundary = _currentChapterIndex > 0;
+        final initialPage = safePageIndex + (hasPrevBoundary ? 1 : 0);
+        _pageController.dispose();
+        _pageController = PageController(initialPage: initialPage);
+        setState(() {});
       }
     });
 
@@ -200,16 +266,17 @@ class _ReaderPageState extends State<ReaderPage> {
   /// Split current chapter content into pages for page turn mode.
   void _buildPages() {
     setState(() {
-      _pages = _paginateContent(_chapterContent);
+      _pages = _paginateContent(_chapterContent, _lastLayoutSize);
       _currentPageIndex =
           _pages.isEmpty ? 0 : _currentPageIndex.clamp(0, _pages.length - 1);
-      _pageFlipViewVersion++;
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final settings = context.read<SettingsProvider>().settings;
       if (settings.readingMode == ReadingMode.pageTurn && _pages.isNotEmpty) {
-        _pageFlipController.goToPage(_currentPageIndex);
+        _pageController.dispose();
+        _pageController = PageController(initialPage: _currentPageIndex);
+        if (mounted) setState(() {});
       }
     });
   }
@@ -310,62 +377,29 @@ class _ReaderPageState extends State<ReaderPage> {
     _saveProgress(position: _chapters[chapterIndex].startPosition);
   }
 
-  void _onPageFlipped(int pageIndex) {
+  void _onPageChanged(int pageIndex) {
+    // Reached the boundary page (last + 1) → go to next chapter
     if (_hasNextChapter && pageIndex >= _pages.length) {
       _loadChapterContent(_currentChapterIndex + 1);
       return;
     }
+    // Reached the boundary page (first - 1 = index -1 mapped to 0 in itemBuilder)
+    // This is handled differently with PageView item count, see _buildPageTurnView
 
     setState(() {
-      _currentPageIndex = pageIndex;
+      _currentPageIndex = pageIndex.clamp(
+        0,
+        _pages.isNotEmpty ? _pages.length - 1 : 0,
+      );
     });
 
     // Calculate global position for progress
-    final charCount = _pageOffsetForIndex(pageIndex);
+    final charCount = _pageOffsetForIndex(_currentPageIndex);
     final globalPos =
         _chapters.isNotEmpty
             ? _chapters[_currentChapterIndex].startPosition + charCount
             : charCount;
     _saveProgress(position: globalPos);
-  }
-
-  void _onPageFlipPointerDown(PointerDownEvent event) {
-    _pageFlipDragDx = 0;
-    _pageFlipDragDy = 0;
-    _pageFlipStartedOnFirstPage = _currentPageIndex == 0;
-  }
-
-  void _onPageFlipPointerMove(PointerMoveEvent event) {
-    _pageFlipDragDx += event.delta.dx;
-    _pageFlipDragDy += event.delta.dy;
-  }
-
-  void _onPageFlipPointerEnd(PointerEvent event) {
-    final shouldOpenPreviousChapter =
-        _pageFlipStartedOnFirstPage &&
-        _hasPreviousChapter &&
-        _pageFlipDragDx > 72 &&
-        _pageFlipDragDx.abs() > _pageFlipDragDy.abs();
-
-    _pageFlipDragDx = 0;
-    _pageFlipDragDy = 0;
-    _pageFlipStartedOnFirstPage = false;
-
-    if (!shouldOpenPreviousChapter) {
-      return;
-    }
-
-    final previousChapterIndex = _currentChapterIndex - 1;
-    final previousChapter = _chapters[previousChapterIndex];
-    final previousContent = _fullContent.substring(
-      previousChapter.startPosition,
-      previousChapter.endPosition,
-    );
-    final previousPages = _paginateContent(previousContent);
-    _loadChapterContent(
-      previousChapterIndex,
-      initialPageIndex: previousPages.isEmpty ? 0 : previousPages.length - 1,
-    );
   }
 
   double get _currentProgress {
@@ -611,50 +645,107 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Widget _buildPageTurnView(ReadingSettings settings) {
-    if (_pages.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final newSize = Size(constraints.maxWidth, constraints.maxHeight);
+        if (_lastLayoutSize != newSize) {
+          // Schedule re-pagination on next frame with new size
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _lastLayoutSize != newSize) {
+              _lastLayoutSize = newSize;
+              if (_chapterContent.isNotEmpty) {
+                final pages = _paginateContent(_chapterContent, newSize);
+                final safePageIndex =
+                    pages.isEmpty
+                        ? 0
+                        : _pendingInitialPageIndex.clamp(0, pages.length - 1);
+                _pendingInitialPageIndex = 0;
+                final hasPrevBoundary = _currentChapterIndex > 0;
+                final initialPage = safePageIndex + (hasPrevBoundary ? 1 : 0);
+                _pageController.dispose();
+                _pageController = PageController(initialPage: initialPage);
+                setState(() {
+                  _pages = pages;
+                  _currentPageIndex = safePageIndex;
+                });
+              }
+            }
+          });
+        }
 
-    return Listener(
-      onPointerDown: _onPageFlipPointerDown,
-      onPointerMove: _onPageFlipPointerMove,
-      onPointerUp: _onPageFlipPointerEnd,
-      onPointerCancel: _onPageFlipPointerEnd,
-      child: PageFlipWidget(
-        key: ValueKey(_pageFlipViewVersion),
-        controller: _pageFlipController,
-        backgroundColor: Color(settings.backgroundColor),
-        initialIndex: _currentPageIndex.clamp(0, _pages.length - 1),
-        children: List<Widget>.of(
-          _pages.map((page) => _buildPageContent(settings, page)),
-        ),
-        lastPage:
-            _hasNextChapter
-                ? _buildBoundaryPage(
-                  settings,
-                  title: _chapters[_currentChapterIndex + 1].title,
-                  hint: '继续右滑进入下一章',
-                  icon: Icons.keyboard_double_arrow_right,
-                )
-                : null,
-        onPageFlipped: _onPageFlipped,
-      ),
+        if (_pages.isEmpty) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        // Total items: pages + optional boundary pages
+        final hasPrevBoundary = _hasPreviousChapter;
+        final hasNextBoundary = _hasNextChapter;
+        final totalItems =
+            _pages.length +
+            (hasPrevBoundary ? 1 : 0) +
+            (hasNextBoundary ? 1 : 0);
+        final offset = hasPrevBoundary ? 1 : 0;
+
+        return PageView.builder(
+          controller: _pageController,
+          itemCount: totalItems,
+          onPageChanged: (index) {
+            final pageIndex = index - offset;
+            if (hasPrevBoundary && index == 0) {
+              final prevIdx = _currentChapterIndex - 1;
+              final prevChapter = _chapters[prevIdx];
+              final prevContent = _fullContent.substring(
+                prevChapter.startPosition,
+                prevChapter.endPosition,
+              );
+              final prevPages = _paginateContent(prevContent, _lastLayoutSize);
+              _loadChapterContent(
+                prevIdx,
+                initialPageIndex: prevPages.isEmpty ? 0 : prevPages.length - 1,
+              );
+              return;
+            }
+            if (hasNextBoundary && pageIndex >= _pages.length) {
+              _loadChapterContent(_currentChapterIndex + 1);
+              return;
+            }
+            _onPageChanged(pageIndex);
+          },
+          itemBuilder: (context, index) {
+            final pageIndex = index - offset;
+            if (hasPrevBoundary && index == 0) {
+              return _buildBoundaryPage(
+                settings,
+                title: _chapters[_currentChapterIndex - 1].title,
+                hint: '滑动进入上一章',
+                icon: Icons.keyboard_double_arrow_left,
+              );
+            }
+            if (hasNextBoundary && pageIndex >= _pages.length) {
+              return _buildBoundaryPage(
+                settings,
+                title: _chapters[_currentChapterIndex + 1].title,
+                hint: '滑动进入下一章',
+                icon: Icons.keyboard_double_arrow_right,
+              );
+            }
+            return _buildPageContent(settings, _pages[pageIndex]);
+          },
+        );
+      },
     );
   }
 
   Widget _buildPageContent(ReadingSettings settings, String pageContent) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
-      child: Container(
-        color: Color(settings.backgroundColor),
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 48),
-        child: Text(
-          pageContent,
-          style: TextStyle(
-            fontSize: settings.fontSize,
-            height: settings.lineHeight,
-            color: Color(settings.textColor),
-          ),
+    return Container(
+      color: Color(settings.backgroundColor),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 48),
+      child: Text(
+        pageContent,
+        style: TextStyle(
+          fontSize: settings.fontSize,
+          height: settings.lineHeight,
+          color: Color(settings.textColor),
         ),
       ),
     );

@@ -44,30 +44,6 @@ class SettingsPage extends StatelessWidget {
             },
           ),
           const SizedBox(height: 16),
-          const Text(
-            '翻页样式',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          SegmentedButton<PageTurnStyle>(
-            segments: const [
-              ButtonSegment(
-                value: PageTurnStyle.simple,
-                label: Text('简洁'),
-                icon: Icon(Icons.swipe),
-              ),
-              ButtonSegment(
-                value: PageTurnStyle.realistic,
-                label: Text('仿真翻页'),
-                icon: Icon(Icons.menu_book_rounded),
-              ),
-            ],
-            selected: {settings.pageTurnStyle},
-            onSelectionChanged: (styles) {
-              settingsProvider.updatePageTurnStyle(styles.first);
-            },
-          ),
-          const SizedBox(height: 24),
 
           // Theme mode
           const Text(

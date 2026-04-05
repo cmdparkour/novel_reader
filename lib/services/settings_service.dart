@@ -16,7 +16,6 @@ class SettingsService {
             settings.readingMode == ReadingMode.scroll
                 ? ReadingMode.pageTurn
                 : settings.readingMode,
-        pageTurnStyle: settings.pageTurnStyle,
       );
     }
     return const ReadingSettings();

@@ -2,8 +2,6 @@ enum ReadingMode { scroll, pageTurn }
 
 enum AppThemeMode { light, dark, system }
 
-enum PageTurnStyle { simple, realistic }
-
 class ReadingSettings {
   final double fontSize;
   final double lineHeight;
@@ -13,7 +11,6 @@ class ReadingSettings {
   final double screenBrightness;
   final ReadingMode readingMode;
   final AppThemeMode themeMode;
-  final PageTurnStyle pageTurnStyle;
 
   const ReadingSettings({
     this.fontSize = 24.0,
@@ -24,7 +21,6 @@ class ReadingSettings {
     this.screenBrightness = 0.5,
     this.readingMode = ReadingMode.pageTurn,
     this.themeMode = AppThemeMode.light,
-    this.pageTurnStyle = PageTurnStyle.simple,
   });
 
   ReadingSettings copyWith({
@@ -36,7 +32,6 @@ class ReadingSettings {
     double? screenBrightness,
     ReadingMode? readingMode,
     AppThemeMode? themeMode,
-    PageTurnStyle? pageTurnStyle,
   }) {
     return ReadingSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -47,7 +42,6 @@ class ReadingSettings {
       screenBrightness: screenBrightness ?? this.screenBrightness,
       readingMode: readingMode ?? this.readingMode,
       themeMode: themeMode ?? this.themeMode,
-      pageTurnStyle: pageTurnStyle ?? this.pageTurnStyle,
     );
   }
 
@@ -61,7 +55,6 @@ class ReadingSettings {
       'screenBrightness': screenBrightness,
       'readingMode': readingMode.index,
       'themeMode': themeMode.index,
-      'pageTurnStyle': pageTurnStyle.index,
     };
   }
 
@@ -79,9 +72,6 @@ class ReadingSettings {
       themeMode:
           AppThemeMode.values.elementAtOrNull(json['themeMode'] ?? 0) ??
           AppThemeMode.light,
-      pageTurnStyle:
-          PageTurnStyle.values.elementAtOrNull(json['pageTurnStyle'] ?? 0) ??
-          PageTurnStyle.simple,
     );
   }
 

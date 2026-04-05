@@ -50,11 +50,6 @@ class SettingsProvider with ChangeNotifier {
     await _saveSettings();
   }
 
-  Future<void> updatePageTurnStyle(PageTurnStyle style) async {
-    _settings = _settings.copyWith(pageTurnStyle: style);
-    await _saveSettings();
-  }
-
   Future<void> updateThemeMode(AppThemeMode mode) async {
     _settings = _settings.copyWith(themeMode: mode);
     await _saveSettings();
