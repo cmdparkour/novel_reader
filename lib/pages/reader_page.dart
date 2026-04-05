@@ -55,9 +55,9 @@ class _ReaderPageState extends State<ReaderPage> {
       fontSize: settings.fontSize,
       height: settings.lineHeight,
     );
-    // Available width/height inside page padding (16 each side)
+    // Available width/height inside page padding (left/right 16, top 16, bottom 0)
     final availableWidth = pageSize.width - 32;
-    final availableHeight = pageSize.height - 32;
+    final availableHeight = pageSize.height - 16;
 
     // Layout entire content to get line metrics
     final tp = TextPainter(
@@ -435,6 +435,7 @@ class _ReaderPageState extends State<ReaderPage> {
     return Scaffold(
       backgroundColor: Color(settings.backgroundColor),
       body: SafeArea(
+        bottom: false,
         child: Stack(
           children: [
             // Content area
@@ -737,7 +738,8 @@ class _ReaderPageState extends State<ReaderPage> {
   Widget _buildPageContent(ReadingSettings settings, String pageContent) {
     return Container(
       color: Color(settings.backgroundColor),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      alignment: Alignment.topLeft,
       child: Text(
         pageContent,
         style: TextStyle(
