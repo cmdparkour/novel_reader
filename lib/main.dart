@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'providers/book_provider.dart';
 import 'providers/settings_provider.dart';
+import 'providers/tts_provider.dart';
 import 'pages/bookshelf_page.dart';
 
 void main() {
@@ -25,6 +26,7 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider(
           create: (_) => SettingsProvider()..loadSettings(),
         ),
+        ChangeNotifierProvider(create: (_) => TtsProvider()..init()),
       ],
       child: MaterialApp(
         title: '小说阅读器',

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -6,8 +7,10 @@ import '../models/chapter.dart';
 import '../models/reading_settings.dart';
 import '../providers/book_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/tts_provider.dart';
 import '../services/book_service.dart';
 import '../services/chapter_parser.dart';
+import '../services/tts_service.dart';
 import 'chapter_list_page.dart';
 import 'settings_page.dart';
 
@@ -51,6 +54,19 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _isScrollChapterSwitching = false;
 
   int? _deferredPageTurnPosition;
+
+  bool _showTtsPanel = false;
+
+  /// When true, TTS auto-page-turn / auto-scroll is suppressed so the user
+  /// can freely swipe or scroll without TTS fighting for control.
+  bool _userIsInteracting = false;
+  int _userInteractionToken = 0;
+
+  /// Timer-based fallback to estimate TTS reading position and trigger
+  /// page flips even when the progress handler doesn't fire.
+  Timer? _ttsEstimateTimer;
+  int _ttsEstimateOffset = 0;
+  DateTime? _ttsChunkStartTime;
 
   bool get _hasPreviousChapter => _currentChapterIndex > 0;
 
@@ -149,8 +165,14 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   String _cleanChapterContent(String rawContent) {
-    return rawContent.replaceFirstMapped(
-      RegExp(r'^([^\n]*)(\n\s*)+'),
+    // Normalize line endings: strip all \r so only \n remains.
+    final normalized = rawContent.replaceAll('\r', '');
+    // Strip leading blank lines (e.g. \n before the heading).
+    final trimmed = normalized.replaceFirst(RegExp(r'^\n+'), '');
+    // Collapse blank lines between the chapter heading and the first
+    // paragraph into a single newline so there is no visual gap.
+    return trimmed.replaceFirstMapped(
+      RegExp(r'^([^\n]*)\n(?:\s*\n)+'),
       (match) => '${match[1]}\n',
     );
   }
@@ -446,19 +468,233 @@ class _ReaderPageState extends State<ReaderPage> {
     return false;
   }
 
+  /// Track TTS highlight changes to auto-flip pages / auto-scroll.
+  int _lastTtsHighlightStart = -1;
+  bool _wasTtsPlaying = false;
+
+  void _onTtsProgressChanged() {
+    if (!mounted) return;
+    final tts = context.read<TtsProvider>();
+
+    // Detect play/stop transitions to manage the estimate timer.
+    if (tts.isPlaying && !_wasTtsPlaying) {
+      _wasTtsPlaying = true;
+      _startTtsEstimateTimer(tts);
+    } else if (!tts.isPlaying && _wasTtsPlaying) {
+      _wasTtsPlaying = false;
+      _stopTtsEstimateTimer();
+      _ttsLastFlippedToPage = -1;
+    }
+
+    if (!tts.isPlaying || _userIsInteracting) return;
+
+    // Use highlightStart if available (progress handler fired),
+    // otherwise fall back to speakingOffset (chunk-boundary based).
+    int charPos = tts.highlightStart;
+    if (charPos < 0) {
+      charPos = tts.speakingOffset;
+    }
+    if (charPos < 0 || charPos == _lastTtsHighlightStart) return;
+    _lastTtsHighlightStart = charPos;
+
+    // Reset estimate timer anchor whenever we get a real position update
+    _ttsEstimateOffset = charPos;
+    _ttsChunkStartTime = DateTime.now();
+
+    final settings = context.read<SettingsProvider>().settings;
+    if (settings.readingMode == ReadingMode.pageTurn) {
+      _syncTtsPageTurn(charPos);
+    } else {
+      _syncTtsScroll(charPos);
+    }
+  }
+
+  /// Start a periodic timer that estimates TTS reading position based on
+  /// speech rate and elapsed time. Chinese TTS reads ~4-5 chars/sec at
+  /// rate 0.5, scaling linearly with speech rate.
+  void _startTtsEstimateTimer(TtsProvider tts) {
+    _stopTtsEstimateTimer();
+    _ttsEstimateOffset = tts.speakingOffset;
+    _ttsChunkStartTime = DateTime.now();
+    _ttsEstimateTimer = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => _onTtsEstimateTick(),
+    );
+  }
+
+  void _stopTtsEstimateTimer() {
+    _ttsEstimateTimer?.cancel();
+    _ttsEstimateTimer = null;
+  }
+
+  void _onTtsEstimateTick() {
+    if (!mounted || _userIsInteracting) return;
+    final tts = context.read<TtsProvider>();
+    if (!tts.isPlaying) {
+      _stopTtsEstimateTimer();
+      return;
+    }
+
+    if (_ttsChunkStartTime == null) return;
+
+    // Estimate: Chinese TTS speaks ~4 chars/sec at rate 0.5.
+    // Scale linearly: rate 1.0 → ~8 chars/sec.
+    final charsPerSec = tts.speechRate * 8.0;
+    final elapsed =
+        DateTime.now().difference(_ttsChunkStartTime!).inMilliseconds / 1000.0;
+    final estimatedPos = _ttsEstimateOffset + (charsPerSec * elapsed).round();
+    final clampedPos = estimatedPos.clamp(0, _chapterContent.length);
+
+    if (clampedPos == _lastTtsHighlightStart) return;
+    _lastTtsHighlightStart = clampedPos;
+
+    final settings = context.read<SettingsProvider>().settings;
+    if (settings.readingMode == ReadingMode.pageTurn) {
+      _syncTtsPageTurn(clampedPos);
+    } else {
+      _syncTtsScroll(clampedPos);
+    }
+  }
+
+  /// Page-turn mode: flip to the page that contains [charPos].
+  /// We flip slightly early (when ~60% through the current page) so
+  /// the visual page turn happens before the TTS finishes reading the
+  /// last words on the current page.
+  ///
+  /// To prevent oscillation (flip forward → charPos still on old page →
+  /// flip back → repeat), we track the last page we flipped TO and never
+  /// go backward from a TTS-driven flip.
+  int _ttsLastFlippedToPage = -1;
+
+  void _syncTtsPageTurn(int charPos) {
+    if (_pages.isEmpty || _isShifting) return;
+
+    // The "natural" page for this charPos (where the char actually lives).
+    final naturalPage = _pageIndexForCharOffset(_pages, charPos);
+
+    // Calculate how far into the natural page we are
+    final naturalPageStart = _pageOffsetForPages(_pages, naturalPage);
+    final naturalPageLen = _pages[naturalPage].length;
+    final posInPage = charPos - naturalPageStart;
+
+    // Decide target: flip to next page early when past 60% of the
+    // natural page, otherwise stay on the natural page.
+    int targetPage = naturalPage;
+    if (naturalPageLen > 0 &&
+        posInPage > naturalPageLen * 0.6 &&
+        naturalPage < _pages.length - 1) {
+      targetPage = naturalPage + 1;
+    }
+
+    // Never go backward from a TTS-driven flip. This prevents
+    // oscillation when the early-flip fires but charPos hasn't
+    // actually entered the new page's range yet.
+    if (_ttsLastFlippedToPage >= 0 && targetPage < _ttsLastFlippedToPage) {
+      // charPos hasn't caught up yet — stay on the page we flipped to.
+      targetPage = _ttsLastFlippedToPage;
+    }
+
+    // Reset the latch once charPos naturally reaches/passes the flipped page.
+    if (naturalPage >= _ttsLastFlippedToPage) {
+      _ttsLastFlippedToPage = -1;
+    }
+
+    if (targetPage != _currentPageIndex) {
+      _ttsLastFlippedToPage = targetPage;
+      final window = _window;
+      if (window == null) return;
+      final flatIndex = window.flattenedIndexFor(
+        _currentChapterIndex,
+        targetPage,
+      );
+      _pageController.animateToPage(
+        flatIndex,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  /// Scroll mode: scroll so the current reading position is visible.
+  void _syncTtsScroll(int charPos) {
+    if (!_scrollController.hasClients || _chapterContent.isEmpty) return;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    if (maxScroll <= 0) return;
+
+    final fraction = charPos / _chapterContent.length;
+    final targetOffset = (fraction * maxScroll).clamp(0.0, maxScroll);
+    // Only scroll if more than 5% away to avoid jitter
+    final currentFraction = _scrollController.offset / maxScroll;
+    if ((fraction - currentFraction).abs() > 0.03) {
+      _scrollController.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  /// Mark that the user is manually interacting (swiping / scrolling).
+  /// TTS auto-sync is suppressed until the interaction ends.
+  void _onUserInteractionStart() {
+    _userIsInteracting = true;
+    _userInteractionToken++;
+    _ttsLastFlippedToPage = -1;
+  }
+
+  /// After the user lifts their finger, wait a short grace period before
+  /// re-enabling TTS auto-sync so that fling animations can settle.
+  void _onUserInteractionEnd() {
+    final token = ++_userInteractionToken;
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted && _userInteractionToken == token) {
+        _userIsInteracting = false;
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     _loadContent();
     _scrollController.addListener(_onScroll);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final tts = context.read<TtsProvider>();
+
+      // Listen for TTS progress to auto-flip pages / auto-scroll
+      tts.addListener(_onTtsProgressChanged);
+
+      // When TTS finishes reading the current chapter, auto-advance
+      tts.onChapterComplete = () {
+        if (!mounted) return;
+        if (_hasNextChapter) {
+          final nextIndex = _currentChapterIndex + 1;
+          _jumpToChapter(nextIndex);
+          // Start reading the next chapter after a short delay
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (!mounted) return;
+            final nextContent = _chapterContentForIndex(_currentChapterIndex);
+            context.read<TtsProvider>().speakFrom(nextContent, 0);
+          });
+        }
+      };
+    });
   }
 
   @override
   void dispose() {
     _saveProgress();
+    _stopTtsEstimateTimer();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _pageController.dispose();
+    // Remove TTS listener and stop TTS when leaving reader
+    final tts = context.read<TtsProvider>();
+    tts.removeListener(_onTtsProgressChanged);
+    tts.stop();
+    tts.onChapterComplete = null;
     context.read<SettingsProvider>().resetBrightness();
     super.dispose();
   }
@@ -716,14 +952,19 @@ class _ReaderPageState extends State<ReaderPage> {
         child: Stack(
           children: [
             // Content area
-            GestureDetector(
-              onTap: _toggleMenu,
-              child:
-                  _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : settings.readingMode == ReadingMode.pageTurn
-                      ? _buildPageTurnView(settings)
-                      : _buildScrollView(settings),
+            Listener(
+              onPointerDown: (_) => _onUserInteractionStart(),
+              onPointerUp: (_) => _onUserInteractionEnd(),
+              onPointerCancel: (_) => _onUserInteractionEnd(),
+              child: GestureDetector(
+                onTap: _toggleMenu,
+                child:
+                    _isLoading
+                        ? const Center(child: CircularProgressIndicator())
+                        : settings.readingMode == ReadingMode.pageTurn
+                        ? _buildPageTurnView(settings)
+                        : _buildScrollView(settings),
+              ),
             ),
 
             // Tap overlay to dismiss menu from the reading area only.
@@ -807,6 +1048,30 @@ class _ReaderPageState extends State<ReaderPage> {
                             ),
                           IconButton(
                             icon: Icon(
+                              Icons.headphones,
+                              color: Color(settings.textColor),
+                            ),
+                            onPressed: () {
+                              final tts = context.read<TtsProvider>();
+                              final wasPlaying = tts.isPlaying || tts.isPaused;
+                              if (!_showTtsPanel) {
+                                setState(() {
+                                  _showTtsPanel = true;
+                                  _showMenu = false;
+                                });
+                                // Auto-start if not already playing
+                                if (!wasPlaying) _startTts();
+                              } else {
+                                _toggleTtsPanel();
+                                setState(() {
+                                  _showMenu = false;
+                                });
+                              }
+                            },
+                            tooltip: '听书',
+                          ),
+                          IconButton(
+                            icon: Icon(
                               Icons.settings,
                               color: Color(settings.textColor),
                             ),
@@ -847,6 +1112,59 @@ class _ReaderPageState extends State<ReaderPage> {
                 ),
               ),
             ],
+
+            // TTS panel (shown independently of menu)
+            if (_showTtsPanel)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: _buildTtsPanel(settings),
+              ),
+
+            // Mini floating TTS indicator when panel is hidden but TTS active
+            if (!_showTtsPanel && context.watch<TtsProvider>().isPlaying)
+              Positioned(
+                bottom: 16,
+                right: 16,
+                child: GestureDetector(
+                  onTap: () => setState(() => _showTtsPanel = true),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.primary.withAlpha(220),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withAlpha(40),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.headphones, color: Colors.white, size: 18),
+                        SizedBox(width: 6),
+                        Text(
+                          '播放中',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -1042,6 +1360,230 @@ class _ReaderPageState extends State<ReaderPage> {
       ),
     );
   }
+
+  void _toggleTtsPanel() {
+    setState(() {
+      _showTtsPanel = !_showTtsPanel;
+    });
+  }
+
+  void _startTts() {
+    if (_chapterContent.isEmpty) return;
+    final settings = context.read<SettingsProvider>().settings;
+    int charOffset = 0;
+    if (settings.readingMode == ReadingMode.pageTurn) {
+      charOffset = _pageOffsetForIndex(_currentPageIndex);
+    } else {
+      // Scroll mode: estimate char offset from scroll position
+      if (_scrollController.hasClients &&
+          _scrollController.position.maxScrollExtent > 0) {
+        final fraction =
+            _scrollController.offset /
+            _scrollController.position.maxScrollExtent;
+        charOffset = (fraction * _chapterContent.length).round();
+      }
+    }
+    context.read<TtsProvider>().speakFrom(_chapterContent, charOffset);
+  }
+
+  Widget _buildTtsPanel(ReadingSettings settings) {
+    final tts = context.watch<TtsProvider>();
+    final bgColor = Color(settings.backgroundColor).withAlpha(245);
+    final textColor = Color(settings.textColor);
+
+    return Container(
+      color: bgColor,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header
+          Row(
+            children: [
+              Icon(Icons.headphones, color: textColor, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                '听书',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: textColor,
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () {
+                  // Just hide panel — TTS keeps playing in background
+                  _toggleTtsPanel();
+                },
+                child: Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  color: textColor.withAlpha(150),
+                  size: 24,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Play controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // Previous chapter
+              IconButton(
+                onPressed:
+                    _hasPreviousChapter
+                        ? () {
+                          tts.stop();
+                          _jumpToChapter(_currentChapterIndex - 1);
+                          Future.delayed(const Duration(milliseconds: 300), () {
+                            if (mounted) _startTts();
+                          });
+                        }
+                        : null,
+                icon: Icon(
+                  Icons.skip_previous_rounded,
+                  color: textColor,
+                  size: 32,
+                ),
+              ),
+              const SizedBox(width: 16),
+              // Play / Pause
+              GestureDetector(
+                onTap: () {
+                  final tts = context.read<TtsProvider>();
+                  if (tts.isPlaying) {
+                    tts.pause();
+                  } else if (tts.isPaused) {
+                    tts.resume();
+                  } else {
+                    // Stopped — start from current visible position
+                    _startTts();
+                  }
+                },
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  child: Icon(
+                    tts.isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              // Next chapter
+              IconButton(
+                onPressed:
+                    _hasNextChapter
+                        ? () {
+                          tts.stop();
+                          _jumpToChapter(_currentChapterIndex + 1);
+                          Future.delayed(const Duration(milliseconds: 300), () {
+                            if (mounted) _startTts();
+                          });
+                        }
+                        : null,
+                icon: Icon(Icons.skip_next_rounded, color: textColor, size: 32),
+              ),
+              const SizedBox(width: 8),
+              // Stop button
+              IconButton(
+                onPressed: () {
+                  tts.stop();
+                },
+                icon: Icon(
+                  Icons.stop_rounded,
+                  color: textColor.withAlpha(150),
+                  size: 28,
+                ),
+                tooltip: '停止',
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Voice selection: Male / Female
+          Row(
+            children: [
+              Text(
+                '语音',
+                style: TextStyle(fontSize: 13, color: textColor.withAlpha(180)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: _buildVoiceSelector(tts, settings)),
+            ],
+          ),
+          const SizedBox(height: 12),
+
+          // Speech rate
+          Row(
+            children: [
+              Text(
+                '语速',
+                style: TextStyle(fontSize: 13, color: textColor.withAlpha(180)),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                '${tts.speechRate.toStringAsFixed(1)}x',
+                style: TextStyle(fontSize: 13, color: textColor),
+              ),
+              Expanded(
+                child: Slider(
+                  value: tts.speechRate,
+                  min: 0.2,
+                  max: 1.5,
+                  divisions: 13,
+                  label: '${tts.speechRate.toStringAsFixed(1)}x',
+                  onChanged: (value) => tts.setSpeechRate(value),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVoiceSelector(TtsProvider tts, ReadingSettings settings) {
+    final textColor = Color(settings.textColor);
+    final isFemale = tts.currentVoice?.gender == TtsVoiceGender.female;
+
+    return Row(
+      children: [
+        _VoiceChip(
+          label: '女声',
+          icon: Icons.woman,
+          isSelected: isFemale,
+          textColor: textColor,
+          onTap: () {
+            final female =
+                tts.femaleVoices.isNotEmpty ? tts.femaleVoices.first : null;
+            if (female != null) tts.setVoice(female);
+          },
+        ),
+        const SizedBox(width: 12),
+        _VoiceChip(
+          label: '男声',
+          icon: Icons.man,
+          isSelected: !isFemale,
+          textColor: textColor,
+          onTap: () {
+            final male =
+                tts.maleVoices.isNotEmpty ? tts.maleVoices.first : null;
+            if (male != null) tts.setVoice(male);
+          },
+        ),
+      ],
+    );
+  }
 }
 
 class _ChapterPages {
@@ -1206,4 +1748,69 @@ class _ReaderWindowRef {
   }) : this._(key: key, title: title, hint: hint, icon: icon);
 
   bool get isBoundary => title != null;
+}
+
+class _VoiceChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isSelected;
+  final Color textColor;
+  final VoidCallback onTap;
+
+  const _VoiceChip({
+    required this.label,
+    required this.icon,
+    required this.isSelected,
+    required this.textColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color:
+              isSelected
+                  ? Theme.of(context).colorScheme.primary.withAlpha(40)
+                  : textColor.withAlpha(20),
+          border: Border.all(
+            color:
+                isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : textColor.withAlpha(60),
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 18,
+              color:
+                  isSelected
+                      ? Theme.of(context).colorScheme.primary
+                      : textColor.withAlpha(150),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                color:
+                    isSelected
+                        ? Theme.of(context).colorScheme.primary
+                        : textColor,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

@@ -47,6 +47,9 @@ dependencies:
   
   # Screen brightness control
   screen_brightness: ^1.0.1
+  
+  # Text-to-speech
+  flutter_tts: ^4.2.5
 
 dev_dependencies:
   flutter_test:

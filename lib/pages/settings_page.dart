@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/reading_settings.dart';
 import '../providers/settings_provider.dart';
+import '../providers/tts_provider.dart';
+import '../services/tts_service.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
@@ -260,6 +262,10 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
           ),
+          const SizedBox(height: 24),
+
+          // TTS Settings
+          const _TtsSettingsSection(),
           const SizedBox(height: 32),
         ],
       ),
@@ -275,6 +281,98 @@ class SettingsPage extends StatelessWidget {
       case AppThemeMode.system:
         return '跟随系统';
     }
+  }
+}
+
+class _TtsSettingsSection extends StatelessWidget {
+  const _TtsSettingsSection();
+
+  @override
+  Widget build(BuildContext context) {
+    final tts = context.watch<TtsProvider>();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '听书设置',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+
+        // Default voice
+        Row(
+          children: [
+            const Text('默认语音'),
+            const Spacer(),
+            SegmentedButton<TtsVoiceGender>(
+              segments: const [
+                ButtonSegment(
+                  value: TtsVoiceGender.female,
+                  label: Text('女声'),
+                  icon: Icon(Icons.woman, size: 18),
+                ),
+                ButtonSegment(
+                  value: TtsVoiceGender.male,
+                  label: Text('男声'),
+                  icon: Icon(Icons.man, size: 18),
+                ),
+              ],
+              selected: {tts.currentVoice?.gender ?? TtsVoiceGender.female},
+              onSelectionChanged: (genders) {
+                final gender = genders.first;
+                if (gender == TtsVoiceGender.female &&
+                    tts.femaleVoices.isNotEmpty) {
+                  tts.setVoice(tts.femaleVoices.first);
+                } else if (gender == TtsVoiceGender.male &&
+                    tts.maleVoices.isNotEmpty) {
+                  tts.setVoice(tts.maleVoices.first);
+                }
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Speech rate
+        const Text('朗读语速'),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Text('慢'),
+            Expanded(
+              child: Slider(
+                value: tts.speechRate,
+                min: 0.2,
+                max: 1.5,
+                divisions: 13,
+                label: '${tts.speechRate.toStringAsFixed(1)}x',
+                onChanged: (value) => tts.setSpeechRate(value),
+              ),
+            ),
+            const Text('快'),
+          ],
+        ),
+        Center(
+          child: Text(
+            '当前语速: ${tts.speechRate.toStringAsFixed(1)}x',
+            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Test button
+        Center(
+          child: ElevatedButton.icon(
+            onPressed: () {
+              tts.speak('这是一段听书测试文字，您可以在这里调整语音和语速。');
+            },
+            icon: const Icon(Icons.play_arrow, size: 20),
+            label: const Text('试听'),
+          ),
+        ),
+      ],
+    );
   }
 }
 
