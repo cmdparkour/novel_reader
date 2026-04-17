@@ -68,6 +68,10 @@ class _ReaderPageState extends State<ReaderPage> {
   int _ttsEstimateOffset = 0;
   DateTime? _ttsChunkStartTime;
 
+  /// Sleep timer for TTS auto-stop.
+  Timer? _ttsSleepTimer;
+  Duration? _ttsSleepDuration;
+
   bool get _hasPreviousChapter => _currentChapterIndex > 0;
 
   bool get _hasNextChapter => _currentChapterIndex < _chapters.length - 1;
@@ -525,6 +529,38 @@ class _ReaderPageState extends State<ReaderPage> {
   void _stopTtsEstimateTimer() {
     _ttsEstimateTimer?.cancel();
     _ttsEstimateTimer = null;
+  }
+
+  void _cancelTtsSleepTimer() {
+    _ttsSleepTimer?.cancel();
+    _ttsSleepTimer = null;
+    if (mounted) {
+      setState(() {
+        _ttsSleepDuration = null;
+      });
+    } else {
+      _ttsSleepDuration = null;
+    }
+  }
+
+  void _setTtsSleepTimer(Duration? duration) {
+    _ttsSleepTimer?.cancel();
+    _ttsSleepTimer = null;
+
+    if (duration == null) {
+      setState(() {
+        _ttsSleepDuration = null;
+      });
+      return;
+    }
+
+    _ttsSleepDuration = duration;
+    _ttsSleepTimer = Timer(duration, () {
+      if (!mounted) return;
+      context.read<TtsProvider>().stop();
+      _cancelTtsSleepTimer();
+    });
+    setState(() {});
   }
 
   void _onTtsEstimateTick() {
@@ -1035,6 +1071,39 @@ class _ReaderPageState extends State<ReaderPage> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      SegmentedButton<AppThemeMode>(
+                        segments: const [
+                          ButtonSegment(
+                            value: AppThemeMode.light,
+                            label: Text('浅色'),
+                            icon: Icon(Icons.light_mode),
+                          ),
+                          ButtonSegment(
+                            value: AppThemeMode.dark,
+                            label: Text('深色'),
+                            icon: Icon(Icons.dark_mode),
+                          ),
+                          ButtonSegment(
+                            value: AppThemeMode.system,
+                            label: Text('跟随系统'),
+                            icon: Icon(Icons.settings_suggest),
+                          ),
+                        ],
+                        selected: {settingsProvider.settings.themeMode},
+                        onSelectionChanged: (modes) {
+                          final mode = modes.first;
+                          settingsProvider.updateThemeMode(mode);
+                          // Auto-adjust colors when explicitly choosing dark
+                          if (mode == AppThemeMode.dark) {
+                            settingsProvider.updateBackgroundColor(0xFF2E2E2E);
+                            settingsProvider.updateTextColor(0xFFE0E0E0);
+                          } else if (mode == AppThemeMode.light) {
+                            settingsProvider.updateBackgroundColor(0xFFF5F5DC);
+                            settingsProvider.updateTextColor(0xFF000000);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
                       Row(
                         children: [
                           if (_chapters.length > 1)
@@ -1510,6 +1579,64 @@ class _ReaderPageState extends State<ReaderPage> {
           ),
           const SizedBox(height: 16),
 
+          Row(
+            children: [
+              Text(
+                '定时',
+                style: TextStyle(fontSize: 13, color: textColor.withAlpha(180)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _TimerChip(
+                      label: '30分钟',
+                      isSelected:
+                          _ttsSleepDuration == const Duration(minutes: 30),
+                      textColor: textColor,
+                      onTap:
+                          () => _setTtsSleepTimer(const Duration(minutes: 30)),
+                    ),
+                    _TimerChip(
+                      label: '1小时',
+                      isSelected: _ttsSleepDuration == const Duration(hours: 1),
+                      textColor: textColor,
+                      onTap: () => _setTtsSleepTimer(const Duration(hours: 1)),
+                    ),
+                    _TimerChip(
+                      label: '2小时',
+                      isSelected: _ttsSleepDuration == const Duration(hours: 2),
+                      textColor: textColor,
+                      onTap: () => _setTtsSleepTimer(const Duration(hours: 2)),
+                    ),
+                    _TimerChip(
+                      label: '3小时',
+                      isSelected: _ttsSleepDuration == const Duration(hours: 3),
+                      textColor: textColor,
+                      onTap: () => _setTtsSleepTimer(const Duration(hours: 3)),
+                    ),
+                    _TimerChip(
+                      label: '4小时',
+                      isSelected: _ttsSleepDuration == const Duration(hours: 4),
+                      textColor: textColor,
+                      onTap: () => _setTtsSleepTimer(const Duration(hours: 4)),
+                    ),
+                    if (_ttsSleepDuration != null)
+                      _TimerChip(
+                        label: '取消',
+                        isSelected: false,
+                        textColor: textColor,
+                        onTap: _cancelTtsSleepTimer,
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+
           // Voice selection: Male / Female
           Row(
             children: [
@@ -1519,32 +1646,6 @@ class _ReaderPageState extends State<ReaderPage> {
               ),
               const SizedBox(width: 12),
               Expanded(child: _buildVoiceSelector(tts, settings)),
-            ],
-          ),
-          const SizedBox(height: 12),
-
-          // Speech rate
-          Row(
-            children: [
-              Text(
-                '语速',
-                style: TextStyle(fontSize: 13, color: textColor.withAlpha(180)),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                '${tts.speechRate.toStringAsFixed(1)}x',
-                style: TextStyle(fontSize: 13, color: textColor),
-              ),
-              Expanded(
-                child: Slider(
-                  value: tts.speechRate,
-                  min: 0.2,
-                  max: 1.5,
-                  divisions: 13,
-                  label: '${tts.speechRate.toStringAsFixed(1)}x',
-                  onChanged: (value) => tts.setSpeechRate(value),
-                ),
-              ),
             ],
           ),
         ],
@@ -1582,6 +1683,38 @@ class _ReaderPageState extends State<ReaderPage> {
           },
         ),
       ],
+    );
+  }
+
+  Widget _TimerChip({
+    required String label,
+    required bool isSelected,
+    required Color textColor,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? Theme.of(context).colorScheme.primary : null,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color:
+                isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : textColor.withAlpha(80),
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: isSelected ? Colors.white : textColor,
+          ),
+        ),
+      ),
     );
   }
 }
