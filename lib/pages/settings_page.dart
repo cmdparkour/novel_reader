@@ -47,46 +47,6 @@ class SettingsPage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
-          // Theme mode
-          const Text(
-            '主题模式',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          SegmentedButton<AppThemeMode>(
-            segments: const [
-              ButtonSegment(
-                value: AppThemeMode.light,
-                label: Text('浅色'),
-                icon: Icon(Icons.light_mode),
-              ),
-              ButtonSegment(
-                value: AppThemeMode.dark,
-                label: Text('深色'),
-                icon: Icon(Icons.dark_mode),
-              ),
-              ButtonSegment(
-                value: AppThemeMode.system,
-                label: Text('跟随系统'),
-                icon: Icon(Icons.settings_suggest),
-              ),
-            ],
-            selected: {settings.themeMode},
-            onSelectionChanged: (modes) {
-              final mode = modes.first;
-              settingsProvider.updateThemeMode(mode);
-              // Auto-adjust colors when explicitly choosing dark
-              if (mode == AppThemeMode.dark) {
-                settingsProvider.updateBackgroundColor(0xFF2E2E2E);
-                settingsProvider.updateTextColor(0xFFE0E0E0);
-              } else if (mode == AppThemeMode.light) {
-                settingsProvider.updateBackgroundColor(0xFFF5F5DC);
-                settingsProvider.updateTextColor(0xFF000000);
-              }
-            },
-          ),
-          const SizedBox(height: 24),
-
           // Font size
           const Text(
             '字体大小',
@@ -145,20 +105,35 @@ class SettingsPage extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              Text('${(settings.screenBrightness * 100).round()}%'),
+              Text(
+                settings.followSystemBrightness
+                    ? '跟随系统'
+                    : '${(settings.screenBrightness * 100).round()}%',
+              ),
               Expanded(
                 child: Slider(
-                  value: settings.screenBrightness,
-                  min: 0.1,
+                  value: settings.screenBrightness.clamp(0.05, 1.0),
+                  min: 0.05,
                   max: 1.0,
-                  divisions: 9,
+                  divisions: 19,
                   label: '${(settings.screenBrightness * 100).round()}%',
-                  onChanged: (value) {
-                    settingsProvider.updateBrightness(value);
-                  },
+                  onChanged:
+                      settings.followSystemBrightness
+                          ? null
+                          : (value) {
+                            settingsProvider.updateBrightness(value);
+                          },
                 ),
               ),
             ],
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('跟随系统亮度'),
+            value: settings.followSystemBrightness,
+            onChanged: (value) {
+              settingsProvider.updateFollowSystemBrightness(value);
+            },
           ),
           const SizedBox(height: 24),
 
@@ -254,7 +229,8 @@ class SettingsPage extends StatelessWidget {
             child: Text(
               '这是阅读预览文字。The quick brown fox jumps over the lazy dog.\n\n'
               '当前模式：${settings.readingMode == ReadingMode.scroll ? "滚动" : "翻页"} | '
-              '主题：${_themeModeName(settings.themeMode)}',
+              '主题：${_themeModeName(settings.themeMode)} | '
+              '亮度：${settings.followSystemBrightness ? "跟随系统" : "${(settings.screenBrightness * 100).round()}%"}',
               style: TextStyle(
                 fontSize: settings.fontSize,
                 height: settings.lineHeight,

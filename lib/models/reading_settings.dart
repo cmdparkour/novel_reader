@@ -9,6 +9,7 @@ class ReadingSettings {
   final int backgroundColor;
   final int textColor;
   final double screenBrightness;
+  final bool followSystemBrightness;
   final ReadingMode readingMode;
   final AppThemeMode themeMode;
 
@@ -19,6 +20,7 @@ class ReadingSettings {
     this.backgroundColor = 0xFFF5F5DC, // Beige
     this.textColor = 0xFF000000, // Black
     this.screenBrightness = 0.5,
+    this.followSystemBrightness = false,
     this.readingMode = ReadingMode.pageTurn,
     this.themeMode = AppThemeMode.light,
   });
@@ -30,6 +32,7 @@ class ReadingSettings {
     int? backgroundColor,
     int? textColor,
     double? screenBrightness,
+    bool? followSystemBrightness,
     ReadingMode? readingMode,
     AppThemeMode? themeMode,
   }) {
@@ -40,6 +43,8 @@ class ReadingSettings {
       backgroundColor: backgroundColor ?? this.backgroundColor,
       textColor: textColor ?? this.textColor,
       screenBrightness: screenBrightness ?? this.screenBrightness,
+      followSystemBrightness:
+          followSystemBrightness ?? this.followSystemBrightness,
       readingMode: readingMode ?? this.readingMode,
       themeMode: themeMode ?? this.themeMode,
     );
@@ -53,6 +58,7 @@ class ReadingSettings {
       'backgroundColor': backgroundColor,
       'textColor': textColor,
       'screenBrightness': screenBrightness,
+      'followSystemBrightness': followSystemBrightness,
       'readingMode': readingMode.index,
       'themeMode': themeMode.index,
     };
@@ -66,6 +72,7 @@ class ReadingSettings {
       backgroundColor: json['backgroundColor'] ?? 0xFFF5F5DC,
       textColor: json['textColor'] ?? 0xFF000000,
       screenBrightness: json['screenBrightness']?.toDouble() ?? 0.5,
+      followSystemBrightness: json['followSystemBrightness'] ?? false,
       readingMode:
           ReadingMode.values.elementAtOrNull(json['readingMode'] ?? 1) ??
           ReadingMode.pageTurn,

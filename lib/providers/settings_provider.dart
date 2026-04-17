@@ -40,7 +40,16 @@ class SettingsProvider with ChangeNotifier {
   }
 
   Future<void> updateBrightness(double brightness) async {
-    _settings = _settings.copyWith(screenBrightness: brightness);
+    _settings = _settings.copyWith(
+      screenBrightness: brightness.clamp(0.05, 1.0),
+      followSystemBrightness: false,
+    );
+    await _applyBrightness();
+    await _saveSettings();
+  }
+
+  Future<void> updateFollowSystemBrightness(bool enabled) async {
+    _settings = _settings.copyWith(followSystemBrightness: enabled);
     await _applyBrightness();
     await _saveSettings();
   }
@@ -67,7 +76,13 @@ class SettingsProvider with ChangeNotifier {
 
   Future<void> _applyBrightness() async {
     try {
-      await ScreenBrightness().setScreenBrightness(_settings.screenBrightness);
+      if (_settings.followSystemBrightness) {
+        await ScreenBrightness().resetScreenBrightness();
+      } else {
+        await ScreenBrightness().setScreenBrightness(
+          _settings.screenBrightness.clamp(0.05, 1.0),
+        );
+      }
     } catch (e) {
       debugPrint('Error setting brightness: $e');
     }
