@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/tts_service.dart';
 
 class TtsProvider with ChangeNotifier {
   final TtsService _ttsService = TtsService();
+  static const MethodChannel _keepAliveChannel = MethodChannel(
+    'novel_reader/tts_keep_alive',
+  );
   bool _initialized = false;
 
   // State
@@ -37,6 +42,26 @@ class TtsProvider with ChangeNotifier {
 
   // Callback: invoked when TTS finishes the entire chapter text
   VoidCallback? onChapterComplete;
+
+  Future<void> _setWakeLock(bool enabled) async {
+    try {
+      if (enabled) {
+        await WakelockPlus.enable();
+      } else {
+        await WakelockPlus.disable();
+      }
+    } catch (e) {
+      debugPrint('[TTS] wakelock error: $e');
+    }
+  }
+
+  Future<void> _setForegroundKeepAlive(bool enabled) async {
+    try {
+      await _keepAliveChannel.invokeMethod(enabled ? 'start' : 'stop');
+    } catch (e) {
+      debugPrint('[TTS] foreground service error: $e');
+    }
+  }
 
   Future<void> init() async {
     if (_initialized) return;
@@ -80,6 +105,7 @@ class TtsProvider with ChangeNotifier {
         _speakNextChunk();
       } else {
         debugPrint('[TTS] chapter complete');
+        _setWakeLock(false);
         _speakingText = '';
         _speakingOffset = 0;
         _highlightStart = -1;
@@ -137,6 +163,8 @@ class TtsProvider with ChangeNotifier {
 
     _speakingText = text;
     _speakingOffset = 0;
+    await _setWakeLock(true);
+    await _setForegroundKeepAlive(true);
     _speakNextChunk();
   }
 
@@ -147,11 +175,15 @@ class TtsProvider with ChangeNotifier {
 
     _speakingText = fullText;
     _speakingOffset = offset.clamp(0, fullText.length);
+    await _setWakeLock(true);
+    await _setForegroundKeepAlive(true);
     _speakNextChunk();
   }
 
   Future<void> pause() async {
     await _ttsService.pause();
+    await _setWakeLock(false);
+    await _setForegroundKeepAlive(false);
   }
 
   Future<void> resume() async {
@@ -164,6 +196,8 @@ class TtsProvider with ChangeNotifier {
   Future<void> stop() async {
     _speakingText = '';
     _speakingOffset = 0;
+    await _setWakeLock(false);
+    await _setForegroundKeepAlive(false);
     await _ttsService.stop();
   }
 
@@ -207,6 +241,8 @@ class TtsProvider with ChangeNotifier {
           .toList();
 
   Future<void> dispose() async {
+    await _setWakeLock(false);
+    await _setForegroundKeepAlive(false);
     await _ttsService.dispose();
     super.dispose();
   }
